@@ -1,0 +1,14 @@
+# ignore local results
+*.npy*
+
+# ignore images
+*.png*
+*.jpg*
+*.jpeg*
+*.pdf*
+
+# ignore CMA-ES output
+outcmaes/
+
+# ignore __pycache__
+__pycache__/
