@@ -7,26 +7,33 @@ import matplotlib.pyplot as plt
 
 from qibo import hamiltonians, set_backend, models, gates
 from qibo.derivative import parameter_shift
+from qibo.config import log, raise_error
 
 from evolution import generate_adiabatic
 from training import train_adiabatic_evolution
 from rotational_circuit import RotationsGenerator
 from plotscripts import show_sample, plot_energy, plot_final_results
-from utils import compute_expectations
+from circuit_utils import compute_expectations, compute_derivatives, build_circuit
+from generate_data import generate_gamma
 
 set_backend("numpy")
 
-# --------------------------------------------- INITIALISATION
+# ------------------------------------------------ INITIALISATION of the problem
 
 # Definition of the Adiabatic evolution
-
 nqubits = 1
 finalT = 80
 dt = 1e-1
 
-load = False
+load = True
 
+# problem dimensionality
+ndim = 3
 colors = ["orange", "red", "blue"]
+
+# to fix divergencies
+eps = 1e-5
+nshots = 50000
 
 # rank of the polynomial scheduling
 nparams = 6
@@ -65,31 +72,7 @@ evolution, energy = generate_adiabatic(h0=h0, h1=h1, obs_target=obs_target, dt=d
 # evolve until final time
 _ = evolution(final_time=finalT)
 
-
-def cdf_fun(xarr, shape=10, scale=0.5, swap=False):
-    """Generate a sample of data following a Gamma distribution."""
-    
-    nvals = 5000
-    
-    sample = np.random.gamma(shape, scale, nvals)
-
-    if swap:
-        sample *= -1
-
-    normed_sample = (sample - np.min(sample)) / (np.max(sample) - np.min(sample)) 
-
-    h, b = np.histogram(normed_sample, bins=nsteps, range=[0,1], density=False)
-    # Sanity check
-    np.testing.assert_allclose(b, xarr)
-
-    cdf_raw = np.insert(np.cumsum(h)/len(h), 0, 0)
-
-    # Translate the CDF such that it goes from 0 to 1
-    cdf_norm = (cdf_raw - np.min(cdf_raw)) / (np.max(cdf_raw) - np.min(cdf_raw))
-    # And now make it go from the E_initial to E_final (E0 to E1)
-    cdf = e0 + cdf_norm*(e1 - e0)
-
-    return cdf, sample, normed_sample
+# ------------------------------- Generate multi dimensional gamma distributions
 
 cdf, sample, normed_sample = [], [], []
 
@@ -99,7 +82,14 @@ swaps = [True, True, False]
 map = {}
 
 for i, (shape, scale, swap) in enumerate(zip(shapes, scales, swaps)):
-    cdf_outputs = cdf_fun(xarr, shape=shape, scale=scale, swap=swap)
+    cdf_outputs = generate_gamma(
+        xarr=xarr, 
+        nsteps=nsteps, 
+        e0=e0, 
+        e1=e1, 
+        shape=shape, 
+        scale=scale, 
+        swap=swap)
     cdf.append(cdf_outputs[0])
     sample.append(cdf_outputs[1])
     normed_sample.append(cdf_outputs[2])
@@ -107,13 +97,15 @@ for i, (shape, scale, swap) in enumerate(zip(shapes, scales, swaps)):
 
 df = pd.DataFrame(map)
 
-plt.figure(figsize=(5,5))
-sns.pairplot(df, diag_kind="hist", corner=True)
-plt.tight_layout()
-plt.savefig("corner.png")
+if False:
+    plt.figure(figsize=(5,5))
+    sns.pairplot(df, diag_kind="hist", corner=True)
+    plt.tight_layout()
+    plt.savefig("corner.png")
+    show_sample(times=xarr, sample=normed_sample, cdf=cdf, title="Target Cumulative Density Function")
+    plot_energy(times=xarr, energies=energy.results, title="Callbacks VS eCDF", cdf=cdf)
 
-#show_sample(times=xarr, sample=normed_sample, cdf=cdf, title="Target Cumulative Density Function")
-#plot_energy(times=xarr, energies=energy.results, title="Callbacks VS eCDF", cdf=cdf)
+# --------------------------------------- Load or compute best parameters vector
 
 if not load:
     print("Training procedure starts here")
@@ -142,42 +134,60 @@ else:
     best_params = np.load("best_params.npy")
 
 
-c = models.Circuit(3)
-generators, expectations = [], []
+generators, expectations, derivatives = [], [], []
+#build circuit
+circuit = build_circuit(ndim=ndim)
+print("Built circuit:\n", circuit.draw())
 
-for i in range(3):
-    print(f"best_params for variable x{i}: {best_params[i]}")
+for i in range(ndim):
     generators.append(RotationsGenerator(best_p=best_params[i], finalT=finalT))
-    c.add(gates.H(q=i))
-    c.add(gates.RZ(q=i, theta=0))
-    c.add(gates.RX(q=i, theta=0))
-    c.add(gates.RZ(q=i, theta=0))
-c.add(gates.M(*range(3), collapse=False))
 
-def collect_params(t):
-    params = []
-    for i in range(3):
-        params.extend(generators[i].rotation_angles(t))
-    return params 
 
-eps = 1e-5
+#----------------------------- Compute CDF and PDF estimations using the circuit
 
-real_times = np.linspace(0,finalT-eps,100)
+
+real_times = np.linspace(0 + eps, finalT - eps, 100)
+
 
 for i, t in enumerate(real_times):
     if i%10 == 0:
         print(f"Executing with time t={t}")
-    c.set_parameters(collect_params(t))
-    res = c(nshots=10000).frequencies()
-    expectations.append(compute_expectations(res, nqubits=3))
+
+    expectations.append(
+        compute_expectations(
+            circuit=circuit,
+            times=[t,t,t],
+            generators=generators,
+            ndim=ndim,
+            nshots=nshots
+            )
+        )
+
+    derivatives.append(
+        compute_derivatives(
+            circuit=circuit,
+            times=[t,t,t],
+            generators=generators,
+            ndim=ndim,
+            nshots=nshots
+            )
+        )
 
 
 expectations = np.array(expectations).T
+derivatives = np.array(derivatives).T
 
 plt.figure(figsize=(5,5*6/8))
-for i in range(3):
+for i in range(ndim):
     plt.plot(xarr, -cdf[i], lw=1.5, ls='--', alpha=0.8, color=colors[i])
     plt.plot(real_times/finalT, expectations[i], lw=1.5, ls='-', alpha=0.8, color=colors[i])
 plt.savefig("final_cdfs.png")
 
+plt.figure(figsize=(5,5*6/8))
+for i in range(ndim):
+    #plt.plot(xarr, -cdf[i], lw=1.5, ls='--', alpha=0.8, color=colors[i])
+    plt.plot(real_times/finalT, derivatives[i], lw=1.5, ls='-', alpha=0.8, color=colors[i])
+    plt.xlim(0,0.8)
+    plt.ylim(0,None)
+plt.savefig("final_pdfs.png")
 
