@@ -43,7 +43,7 @@ Once `optimize-ae.py` is run, the results are saved in a proper folder.
 At this point, the PDF can be calculated by running:
 
 ```
-python estimate-pdf.py --cdf_mode easy --dt 0.1 --finalT 50 --nqubits 1 --nshots 100000
+python estimate_pdf.py --cdf_mode easy --dt 0.1 --finalT 50 --nqubits 1 --nshots 100000
 ```
 
 where you can set the number of shots used for evaluating the circuit. 
